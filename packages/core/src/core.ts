@@ -38,14 +38,15 @@ let CurrentGetsIndex = 0;
 let EffectQueue: Reactive<any>[] = [];
 
 /** reactive nodes are marked dirty when their source values change TBD*/
-export const CacheClean = 0; // reactive value is valid, no need to recompute
-export const CacheCheck = 1; // reactive value might be stale, check parent nodes to decide whether to recompute
-export const CacheDirty = 2; // reactive value is invalid, parents have changed, valueneeds to be recomputed
-export type CacheState =
-  | typeof CacheClean
-  | typeof CacheCheck
-  | typeof CacheDirty;
-type CacheNonClean = typeof CacheCheck | typeof CacheDirty;
+type Cache =
+  // reactive value is valid, no need to recompute
+  | 'CLEAN'
+  // reactive value might be stale, check parent nodes to decide whether to recompute
+  | 'CHECK'
+  // reactive value is invalid, parents have changed, valueneeds to be recomputed
+  | 'DIRTY';
+
+type CacheWithoutClean = Exclude<Cache, 'CLEAN'>;
 
 /** A reactive element contains a mutable value that can be observed by other reactive elements.
  *
@@ -81,21 +82,21 @@ export class Reactive<T> {
   private observers: Reactive<any>[] | null = null; // nodes that have us as sources (down links)
   private sources: Reactive<any>[] | null = null; // sources in reference order, not deduplicated (up links)
 
-  private state: CacheState;
+  private state: Cache;
   private effect: boolean;
   cleanups: ((oldValue: T) => void)[] = [];
 
   constructor(fnOrValue: (() => T) | T, effect?: boolean) {
-    if (typeof fnOrValue === "function") {
+    if (typeof fnOrValue === 'function') {
       this.fn = fnOrValue as () => T;
       this._value = undefined as any;
       this.effect = effect || false;
-      this.state = CacheDirty;
+      this.state = 'DIRTY';
       if (effect) this.update(); // CONSIDER removing this?
     } else {
       this.fn = undefined;
       this._value = fnOrValue;
-      this.state = CacheClean;
+      this.state = 'CLEAN';
       this.effect = false;
     }
   }
@@ -128,21 +129,22 @@ export class Reactive<T> {
   set(value: T): void {
     if (this._value !== value && this.observers) {
       for (let i = 0; i < this.observers.length; i++) {
-        this.observers[i].stale(CacheDirty);
+        this.observers[i].stale('DIRTY');
       }
     }
     this._value = value;
   }
 
-  private stale(state: CacheNonClean): void {
-    if (this.state < state) {
+  private stale(state: CacheWithoutClean): void {
+    if (this.state === 'CLEAN') {
       // If we were previously clean, then we know that we may need to update to get the new value
-      if (this.state === CacheClean && this.effect) EffectQueue.push(this);
-      
+      if (this.effect) EffectQueue.push(this);
+
       this.state = state;
+
       if (this.observers) {
         for (let i = 0; i < this.observers.length; i++) {
-          this.observers[i].stale(CacheCheck);
+          this.observers[i].stale('CHECK');
         }
       }
     }
@@ -206,22 +208,22 @@ export class Reactive<T> {
     if (oldValue !== this._value && this.observers) {
       // We've changed value, so mark our children as dirty so they'll reevaluate
       for (let i = 0; i < this.observers.length; i++) {
-        this.observers[i].state = CacheDirty;
+        this.observers[i].state = 'DIRTY';
       }
     }
 
     // We've rerun with the latest values from all of our sources.
     // This means that we no longer need to update until a signal changes
-    this.state = CacheClean;
+    this.state = 'CLEAN';
   }
 
   /** update() if dirty, or a parent turns out to be dirty. */
   private updateIfNecessary(): void {
     // If we are potentially dirty, see if we have a parent who has actually changed value
-    if (this.state === CacheCheck) {
+    if (this.state === 'CHECK') {
       for (const source of this.sources!) {
         source.updateIfNecessary(); // updateIfNecessary() can change this.state
-        if ((this.state as CacheState) === CacheDirty) {
+        if ((this.state as Cache) === 'DIRTY') {
           // Stop the loop here so we won't trigger updates on other parents unnecessarily
           // If our computation changes to no longer use some sources, we don't
           // want to update() a source we used last time, but now don't use.
@@ -231,12 +233,12 @@ export class Reactive<T> {
     }
 
     // If we were already dirty or marked dirty by the step above, update.
-    if (this.state === CacheDirty) {
+    if (this.state === 'DIRTY') {
       this.update();
     }
 
     // By now, we're clean
-    this.state = CacheClean;
+    this.state = 'CLEAN';
   }
 
   private removeParentObservers(): void {
@@ -254,7 +256,7 @@ export function onCleanup<T = any>(fn: (oldValue: T) => void): void {
   if (CurrentReaction) {
     CurrentReaction.cleanups.push(fn);
   } else {
-    console.error("onCleanup must be called from within a @reactive function");
+    console.error('onCleanup must be called from within a @reactive function');
   }
 }
 
